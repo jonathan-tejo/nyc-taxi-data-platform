@@ -1,0 +1,18 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit real values.
+
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+env        = "dev"
+
+bq_location         = "US"
+data_retention_days = 90
+
+# Set to true + configure cron to schedule automatic monthly runs
+enable_scheduler = false
+scheduler_cron   = "0 6 1 * *"
+
+labels = {
+  team        = "data-engineering"
+  cost_center = "analytics"
+}

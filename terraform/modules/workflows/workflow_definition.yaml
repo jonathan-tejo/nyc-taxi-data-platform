@@ -1,0 +1,452 @@
+main:
+  params: [args]
+  steps:
+
+    # ── Initialization ──────────────────────────────────────
+    - init:
+        assign:
+          - project_id: "${project_id}"
+          - env: "${env}"
+          - raw_bucket: "${raw_bucket_name}"
+          - bq_bronze: "${bq_dataset_bronze}"
+          - bq_silver: "${bq_dataset_silver}"
+          - bq_gold: "${bq_dataset_gold}"
+          - execution_date: $${args.execution_date}
+          - run_id: $${sys.now()}
+          - pipeline_start: $${sys.now()}
+
+    - resolve_execution_date:
+        switch:
+          - condition: $${execution_date == "AUTO"}
+            steps:
+              - compute_auto_date:
+                  assign:
+                    - execution_date: $${text.substring(time.format(sys.now() - 2592000), 0, 7)}
+        next: log_pipeline_start
+
+    - log_pipeline_start:
+        call: sys.log
+        args:
+          data:
+            message: "Pipeline started"
+            run_id: $${run_id}
+            execution_date: $${execution_date}
+            env: $${env}
+          severity: INFO
+
+    # ── Record run start ────────────────────────────────────
+    - record_run_start:
+        call: http.post
+        args:
+          url: $${"https://bigquery.googleapis.com/bigquery/v2/projects/" + project_id + "/datasets/${bq_dataset_bronze}/tables/pipeline_runs_temp/insertAll"}
+          auth:
+            type: OAuth2
+          body:
+            rows:
+              - insertId: $${run_id}
+                json:
+                  run_id: $${run_id}
+                  execution_date: $${execution_date}
+                  env: $${env}
+                  status: "STARTED"
+                  run_date: $${time.format(sys.now())}
+        result: record_start_result
+
+    # ── Step 1: Ingest raw data from TLC to GCS ─────────────
+    - step_ingest:
+        call: http.post
+        args:
+          url: $${"https://bigquery.googleapis.com/bigquery/v2/projects/" + project_id + "/jobs"}
+          auth:
+            type: OAuth2
+          body:
+            configuration:
+              query:
+                query: >-
+                  CALL `${bq_dataset_bronze}`.sp_log_ingestion_start(@run_id, @execution_date)
+                queryParameters:
+                  - name: run_id
+                    parameterType:
+                      type: STRING
+                    parameterValue:
+                      value: $${run_id}
+                  - name: execution_date
+                    parameterType:
+                      type: STRING
+                    parameterValue:
+                      value: $${execution_date}
+                useLegacySql: false
+                location: "US"
+        result: ingest_job
+
+    - wait_ingest:
+        call: wait_for_bq_job
+        args:
+          project_id: $${project_id}
+          job_id: $${ingest_job.body.jobReference.jobId}
+          location: "US"
+        result: ingest_status
+
+    - check_ingest_status:
+        switch:
+          - condition: $${ingest_status != "DONE"}
+            raise: $${{"message": "Ingestion job failed", "step": "ingest", "status": ingest_status}}
+
+    - log_ingest_done:
+        call: sys.log
+        args:
+          data:
+            message: "Ingestion step completed"
+            execution_date: $${execution_date}
+          severity: INFO
+
+    # ── Step 2: Load bronze layer ────────────────────────────
+    - step_bronze:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            MERGE `${bq_dataset_bronze}`.trips AS T
+            USING (
+              SELECT * EXCEPT(row_num) FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY VendorID, tpep_pickup_datetime, tpep_dropoff_datetime ORDER BY _ingested_at DESC) AS row_num
+                FROM `${bq_dataset_bronze}`.trips_staging
+                WHERE _execution_date = @execution_date
+              ) WHERE row_num = 1
+            ) AS S
+            ON T.VendorID = S.VendorID
+              AND T.tpep_pickup_datetime = S.tpep_pickup_datetime
+              AND T.tpep_dropoff_datetime = S.tpep_dropoff_datetime
+            WHEN NOT MATCHED THEN INSERT ROW
+          params:
+            execution_date: $${execution_date}
+        result: bronze_result
+
+    - log_bronze_done:
+        call: sys.log
+        args:
+          data:
+            message: "Bronze layer loaded"
+            rows: $${bronze_result.rows_affected}
+          severity: INFO
+
+    # ── Step 3: Quality check on bronze ─────────────────────
+    - quality_bronze:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            INSERT INTO `${bq_dataset_bronze}`.quality_checks
+            SELECT
+              @run_id AS run_id,
+              @execution_date AS execution_date,
+              'bronze' AS layer,
+              check_name,
+              table_name,
+              status,
+              rows_tested,
+              rows_failed,
+              SAFE_DIVIDE(rows_failed, rows_tested) AS failure_rate,
+              threshold,
+              CURRENT_TIMESTAMP() AS check_timestamp,
+              details
+            FROM UNNEST([
+              STRUCT(
+                'not_null_pickup_datetime' AS check_name,
+                '${bq_dataset_bronze}.trips' AS table_name,
+                IF(COUNT(*) - COUNTIF(tpep_pickup_datetime IS NOT NULL) = 0, 'PASSED', 'FAILED') AS status,
+                COUNT(*) AS rows_tested,
+                COUNTIF(tpep_pickup_datetime IS NULL) AS rows_failed,
+                0.0 AS threshold,
+                'NULL pickup datetimes' AS details
+              )
+            FROM `${bq_dataset_bronze}`.trips
+            WHERE _execution_date = @execution_date
+            ])
+          params:
+            run_id: $${run_id}
+            execution_date: $${execution_date}
+        result: quality_bronze_result
+
+    # ── Step 4: Transform silver layer ──────────────────────
+    - step_silver:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            CREATE OR REPLACE TABLE `${bq_dataset_silver}`.trips
+            PARTITION BY DATE(pickup_datetime)
+            CLUSTER BY pickup_location_id, payment_type
+            AS
+            SELECT
+              VendorID AS vendor_id,
+              CAST(tpep_pickup_datetime AS TIMESTAMP) AS pickup_datetime,
+              CAST(tpep_dropoff_datetime AS TIMESTAMP) AS dropoff_datetime,
+              DATE(tpep_pickup_datetime) AS pickup_date,
+              EXTRACT(HOUR FROM tpep_pickup_datetime) AS pickup_hour,
+              EXTRACT(DAYOFWEEK FROM tpep_pickup_datetime) AS pickup_dow,
+              TIMESTAMP_DIFF(tpep_dropoff_datetime, tpep_pickup_datetime, MINUTE) AS trip_duration_min,
+              COALESCE(passenger_count, 1) AS passenger_count,
+              GREATEST(trip_distance, 0) AS trip_distance_miles,
+              PULocationID AS pickup_location_id,
+              DOLocationID AS dropoff_location_id,
+              CASE payment_type
+                WHEN 1 THEN 'Credit Card'
+                WHEN 2 THEN 'Cash'
+                WHEN 3 THEN 'No Charge'
+                WHEN 4 THEN 'Dispute'
+                WHEN 5 THEN 'Unknown'
+                ELSE 'Other'
+              END AS payment_type,
+              GREATEST(fare_amount, 0) AS fare_amount,
+              GREATEST(tip_amount, 0) AS tip_amount,
+              GREATEST(total_amount, 0) AS total_amount,
+              COALESCE(congestion_surcharge, 0) AS congestion_surcharge,
+              COALESCE(airport_fee, 0) AS airport_fee,
+              SAFE_DIVIDE(tip_amount, fare_amount) AS tip_rate,
+              SAFE_DIVIDE(trip_distance, NULLIF(TIMESTAMP_DIFF(tpep_dropoff_datetime, tpep_pickup_datetime, MINUTE), 0)) AS avg_speed_mph,
+              _ingested_at,
+              _execution_date
+            FROM `${bq_dataset_bronze}`.trips
+            WHERE
+              _execution_date = @execution_date
+              AND tpep_pickup_datetime IS NOT NULL
+              AND tpep_dropoff_datetime IS NOT NULL
+              AND tpep_dropoff_datetime > tpep_pickup_datetime
+              AND trip_distance >= 0
+              AND total_amount >= 0
+          params:
+            execution_date: $${execution_date}
+        result: silver_result
+
+    - log_silver_done:
+        call: sys.log
+        args:
+          data:
+            message: "Silver layer built"
+            rows: $${silver_result.rows_affected}
+          severity: INFO
+
+    # ── Step 5: Build gold KPI tables ───────────────────────
+    - step_gold_daily_revenue:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            CREATE OR REPLACE TABLE `${bq_dataset_gold}`.kpi_daily_revenue
+            PARTITION BY pickup_date
+            CLUSTER BY pickup_date
+            AS
+            SELECT
+              pickup_date,
+              COUNT(*) AS total_trips,
+              SUM(passenger_count) AS total_passengers,
+              ROUND(SUM(total_amount), 2) AS total_revenue,
+              ROUND(AVG(total_amount), 2) AS avg_revenue_per_trip,
+              ROUND(SUM(fare_amount), 2) AS total_fare,
+              ROUND(SUM(tip_amount), 2) AS total_tips,
+              ROUND(AVG(tip_rate), 4) AS avg_tip_rate,
+              ROUND(AVG(trip_distance_miles), 2) AS avg_trip_distance,
+              ROUND(AVG(trip_duration_min), 1) AS avg_trip_duration_min,
+              COUNTIF(payment_type = 'Credit Card') AS credit_card_trips,
+              COUNTIF(payment_type = 'Cash') AS cash_trips,
+              CURRENT_TIMESTAMP() AS updated_at
+            FROM `${bq_dataset_silver}`.trips
+            WHERE _execution_date = @execution_date
+            GROUP BY pickup_date
+          params:
+            execution_date: $${execution_date}
+        result: gold_revenue_result
+
+    - step_gold_zone_performance:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            CREATE OR REPLACE TABLE `${bq_dataset_gold}`.kpi_zone_performance
+            PARTITION BY _partition_date
+            AS
+            SELECT
+              DATE_TRUNC(pickup_date, MONTH) AS month,
+              pickup_location_id AS zone_id,
+              z.zone AS zone_name,
+              z.borough,
+              COUNT(*) AS total_pickups,
+              ROUND(SUM(total_amount), 2) AS total_revenue,
+              ROUND(AVG(total_amount), 2) AS avg_revenue_per_trip,
+              ROUND(AVG(trip_distance_miles), 2) AS avg_distance,
+              ROUND(SUM(passenger_count)) AS total_passengers,
+              DATE_TRUNC(pickup_date, MONTH) AS _partition_date,
+              CURRENT_TIMESTAMP() AS updated_at
+            FROM `${bq_dataset_silver}`.trips t
+            LEFT JOIN `${bq_dataset_silver}`.dim_zones z ON t.pickup_location_id = z.location_id
+            WHERE _execution_date = @execution_date
+            GROUP BY 1, 2, 3, 4
+          params:
+            execution_date: $${execution_date}
+        result: gold_zone_result
+
+    - step_gold_hourly_patterns:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            CREATE OR REPLACE TABLE `${bq_dataset_gold}`.kpi_hourly_patterns
+            AS
+            SELECT
+              FORMAT_DATE('%Y-%m', pickup_date) AS month,
+              pickup_dow,
+              CASE pickup_dow
+                WHEN 1 THEN 'Sunday' WHEN 2 THEN 'Monday' WHEN 3 THEN 'Tuesday'
+                WHEN 4 THEN 'Wednesday' WHEN 5 THEN 'Thursday' WHEN 6 THEN 'Friday'
+                WHEN 7 THEN 'Saturday'
+              END AS day_of_week,
+              pickup_hour,
+              COUNT(*) AS total_trips,
+              ROUND(AVG(total_amount), 2) AS avg_revenue,
+              ROUND(AVG(trip_duration_min), 1) AS avg_duration_min,
+              ROUND(AVG(trip_distance_miles), 2) AS avg_distance,
+              CURRENT_TIMESTAMP() AS updated_at
+            FROM `${bq_dataset_silver}`.trips
+            WHERE _execution_date = @execution_date
+            GROUP BY 1, 2, 3, 4
+          params:
+            execution_date: $${execution_date}
+        result: gold_hourly_result
+
+    - log_gold_done:
+        call: sys.log
+        args:
+          data:
+            message: "Gold KPI tables built"
+          severity: INFO
+
+    # ── Step 6: Final quality gate ───────────────────────────
+    - quality_gate_gold:
+        call: run_bq_query
+        args:
+          project_id: $${project_id}
+          query: >-
+            SELECT
+              COUNT(*) AS total_days,
+              SUM(total_trips) AS total_trips,
+              SUM(total_revenue) AS total_revenue,
+              MIN(pickup_date) AS min_date,
+              MAX(pickup_date) AS max_date
+            FROM `${bq_dataset_gold}`.kpi_daily_revenue
+            WHERE FORMAT_DATE('%Y-%m', pickup_date) = @execution_date
+          params:
+            execution_date: $${execution_date}
+        result: gold_stats
+
+    - validate_gold_rows:
+        switch:
+          - condition: $${gold_stats.rows[0].total_trips < 1000}
+            raise:
+              message: "Gold quality gate failed: too few trips"
+              total_trips: $${gold_stats.rows[0].total_trips}
+              execution_date: $${execution_date}
+
+    # ── Finalize ─────────────────────────────────────────────
+    - log_pipeline_success:
+        call: sys.log
+        args:
+          data:
+            message: "Pipeline completed successfully"
+            run_id: $${run_id}
+            execution_date: $${execution_date}
+            total_trips: $${gold_stats.rows[0].total_trips}
+            total_revenue: $${gold_stats.rows[0].total_revenue}
+          severity: INFO
+
+    - return_result:
+        return:
+          status: "COMPLETED"
+          run_id: $${run_id}
+          execution_date: $${execution_date}
+          total_trips: $${gold_stats.rows[0].total_trips}
+          total_revenue: $${gold_stats.rows[0].total_revenue}
+
+# ── Error handler ─────────────────────────────────────────────
+    - handle_error:
+        steps:
+          - log_error:
+              call: sys.log
+              args:
+                data:
+                  message: "Pipeline FAILED"
+                  run_id: $${run_id}
+                  error: $${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXCEPTION")}
+                severity: ERROR
+          - raise_error:
+              raise: $${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXCEPTION")}
+
+# ── Sub-workflow: run BigQuery query and wait ─────────────────
+run_bq_query:
+  params: [project_id, query, params]
+  steps:
+    - submit_job:
+        call: http.post
+        args:
+          url: $${"https://bigquery.googleapis.com/bigquery/v2/projects/" + project_id + "/jobs"}
+          auth:
+            type: OAuth2
+          body:
+            configuration:
+              query:
+                query: $${query}
+                queryParameters: $${params}
+                useLegacySql: false
+                location: "US"
+        result: job_response
+
+    - poll_job:
+        call: wait_for_bq_job
+        args:
+          project_id: $${project_id}
+          job_id: $${job_response.body.jobReference.jobId}
+          location: "US"
+        result: job_status
+
+    - check_status:
+        switch:
+          - condition: $${job_status != "DONE"}
+            raise: $${{"message": "BQ job failed", "job_id": job_response.body.jobReference.jobId}}
+
+    - return_stats:
+        return:
+          job_id: $${job_response.body.jobReference.jobId}
+          rows_affected: $${job_response.body.statistics.query.numDmlAffectedRows}
+
+# ── Sub-workflow: poll BQ job until done ─────────────────────
+wait_for_bq_job:
+  params: [project_id, job_id, location]
+  steps:
+    - poll:
+        call: http.get
+        args:
+          url: $${"https://bigquery.googleapis.com/bigquery/v2/projects/" + project_id + "/jobs/" + job_id + "?location=" + location}
+          auth:
+            type: OAuth2
+        result: job_status_response
+
+    - check_if_done:
+        switch:
+          - condition: $${job_status_response.body.status.state == "DONE"}
+            next: check_for_errors
+          - condition: true
+            steps:
+              - sleep_before_retry:
+                  call: sys.sleep
+                  args:
+                    seconds: 5
+              - retry_poll:
+                  next: poll
+
+    - check_for_errors:
+        switch:
+          - condition: $${map.get(job_status_response.body.status, "errorResult") != null}
+            raise: $${{"message": "BQ job error", "error": job_status_response.body.status.errorResult}}
+
+    - return_done:
+        return: "DONE"
