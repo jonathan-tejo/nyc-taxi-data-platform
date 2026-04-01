@@ -1,23 +1,23 @@
 # NYC Taxi Data Platform
 
-A production-grade data engineering platform on **Google Cloud Platform** that ingests, processes, and serves NYC Yellow Taxi trip data across a medallion architecture (bronze → silver → gold). Infrastructure is fully reproducible via **Terraform**; the pipeline is orchestrated by **Google Workflows**.
+Una plataforma de ingeniería de datos de nivel productivo en **Google Cloud Platform** que ingesta, procesa y sirve datos de viajes en taxi amarillo de Nueva York bajo una arquitectura medallón (bronze → silver → gold). La infraestructura es completamente reproducible mediante **Terraform**; el pipeline es orquestado por **Google Workflows**.
 
 ---
 
-## The Problem
+## El Problema
 
-The NYC Taxi & Limousine Commission (TLC) publishes monthly Parquet files with tens of millions of trip records. The goal is to make this data queryable, analytically reliable, and business-ready — with automated ingestion, data quality enforcement, and KPI tables serving dashboards and analysts.
+La Comisión de Taxis y Limusinas de Nueva York (TLC) publica mensualmente archivos Parquet con decenas de millones de registros de viajes. El objetivo es hacer que estos datos sean consultables, analíticamente confiables y listos para el negocio — con ingesta automatizada, control de calidad de datos y tablas de KPIs que sirven dashboards y analistas.
 
 ---
 
-## Architecture
+## Arquitectura
 
 ```
 TLC Public API
      │
      ▼  (Python — ingest.py)
 ┌──────────────────────┐
-│   GCS Raw Bucket     │  ← partitioned by YYYY-MM, idempotent
+│   GCS Raw Bucket     │  ← particionado por YYYY-MM, idempotente
 │   yellow/YYYY-MM/    │
 └──────────┬───────────┘
            │ BQ Load Job
@@ -25,67 +25,67 @@ TLC Public API
 ┌─────────────────────────────────────────────────────────────┐
 │                      BigQuery                               │
 │                                                             │
-│  BRONZE (raw, typed)  →  SILVER (clean)  →  GOLD (KPIs)   │
+│  BRONZE (raw, tipado)  →  SILVER (limpio)  →  GOLD (KPIs)  │
 │                                                             │
-│  trips                   trips              kpi_daily_revenue    │
-│                          dim_zones          kpi_zone_performance │
-│                                             kpi_hourly_patterns  │
+│  trips                    trips               kpi_daily_revenue    │
+│                           dim_zones            kpi_zone_performance │
+│                                                kpi_hourly_patterns  │
 └─────────────────────────────────────────────────────────────┘
            ▲
-           │  Google Workflows orchestrates every step
-           │  Cloud Scheduler triggers monthly (optional)
+           │  Google Workflows orquesta cada paso
+           │  Cloud Scheduler dispara mensualmente (opcional)
 ```
 
-Full architecture details: [docs/architecture.md](docs/architecture.md)
+Detalles completos de arquitectura: [docs/architecture.md](docs/architecture.md)
 
 ---
 
-## Stack
+## Stack Tecnológico
 
-| Component | Technology |
+| Componente | Tecnología |
 |-----------|-----------|
-| Infrastructure as Code | Terraform >= 1.5 |
-| Cloud provider | Google Cloud Platform |
+| Infraestructura como Código | Terraform >= 1.5 |
+| Proveedor cloud | Google Cloud Platform |
 | Data warehouse | BigQuery |
-| Object storage | Cloud Storage |
-| Orchestration | Google Workflows |
-| Scheduling | Cloud Scheduler |
-| Ingestion | Python 3.11 |
-| Data processing | BigQuery SQL (CTAS) |
-| Observability | Cloud Logging + BigQuery metadata tables |
+| Almacenamiento de objetos | Cloud Storage |
+| Orquestación | Google Workflows |
+| Programación | Cloud Scheduler |
+| Ingesta | Python 3.11 |
+| Procesamiento de datos | BigQuery SQL (CTAS) |
+| Observabilidad | Cloud Logging + tablas de metadatos en BigQuery |
 
 ---
 
-## Repository Structure
+## Estructura del Repositorio
 
 ```
 .
-├── Makefile                        # All common operations
+├── Makefile                        # Todas las operaciones comunes
 ├── terraform/
-│   ├── main.tf                     # Root module — wires all modules
+│   ├── main.tf                     # Módulo raíz — conecta todos los módulos
 │   ├── variables.tf
 │   ├── outputs.tf
-│   ├── terraform.tfvars.example    # Copy to terraform.tfvars
+│   ├── terraform.tfvars.example    # Copiar a terraform.tfvars
 │   └── modules/
-│       ├── storage/                # GCS buckets
-│       ├── bigquery/               # Datasets + metadata tables
-│       ├── iam/                    # Service account + IAM bindings
-│       └── workflows/              # Workflow definition + Scheduler
+│       ├── storage/                # Buckets de GCS
+│       ├── bigquery/               # Datasets + tablas de metadatos
+│       ├── iam/                    # Cuenta de servicio + bindings de IAM
+│       └── workflows/              # Definición del workflow + Scheduler
 │           └── workflow_definition.yaml
 ├── ingestion/
-│   ├── ingest.py                   # Download TLC → GCS → BQ bronze
-│   ├── utils.py                    # GCS/BQ helpers, structured logging
+│   ├── ingest.py                   # Descarga TLC → GCS → BQ bronze
+│   ├── utils.py                    # Helpers de GCS/BQ, logging estructurado
 │   └── requirements.txt
 ├── transformations/
 │   ├── silver/
-│   │   ├── 01_clean_trips.sql      # Dedup + clean + type cast
-│   │   └── 02_dim_zones.sql        # Static zone dimension
+│   │   ├── 01_clean_trips.sql      # Dedup + limpieza + casteo de tipos
+│   │   └── 02_dim_zones.sql        # Dimensión estática de zonas
 │   └── gold/
 │       ├── 01_kpi_daily_revenue.sql
 │       ├── 02_kpi_zone_performance.sql
 │       └── 03_kpi_hourly_patterns.sql
 ├── quality/
-│   ├── run_checks.py               # 8-check quality suite
+│   ├── run_checks.py               # Suite de 8 controles de calidad
 │   └── requirements.txt
 └── docs/
     └── architecture.md
@@ -93,82 +93,82 @@ Full architecture details: [docs/architecture.md](docs/architecture.md)
 
 ---
 
-## Data Model
+## Modelo de Datos
 
 ### Bronze — `nyc_taxi_{env}_bronze.trips`
 
-Raw TLC data loaded from GCS Parquet. Schema mirrors TLC source exactly, plus three audit columns: `_ingested_at`, `_source_file`, `_execution_date`.
+Datos crudos de TLC cargados desde Parquet en GCS. El esquema replica exactamente la fuente TLC, más tres columnas de auditoría: `_ingested_at`, `_source_file`, `_execution_date`.
 
-- **Partition**: MONTH on `tpep_pickup_datetime`
+- **Partición**: MONTH sobre `tpep_pickup_datetime`
 - **Cluster**: `VendorID`, `payment_type`
 
 ### Silver — `nyc_taxi_{env}_silver.trips`
 
-Cleaned and enriched. Key transformations:
-- Deduplication by `(VendorID, pickup_datetime, dropoff_datetime)`
-- Column renaming and type casting
-- Derived fields: `trip_duration_min`, `tip_rate`, `is_airport_trip`, `time_of_day_segment`
-- Rows with invalid locations, negative amounts, or out-of-range durations are excluded
-- Only rows belonging to `execution_date` month are kept
+Limpio y enriquecido. Transformaciones clave:
+- Deduplicación por `(VendorID, pickup_datetime, dropoff_datetime)`
+- Renombrado de columnas y casteo de tipos
+- Campos derivados: `trip_duration_min`, `tip_rate`, `is_airport_trip`, `time_of_day_segment`
+- Se excluyen filas con ubicaciones inválidas, montos negativos o duraciones fuera de rango
+- Solo se conservan filas del mes correspondiente a `execution_date`
 
-**Partition**: DAY on `pickup_date` | **Cluster**: `pickup_location_id`, `payment_type`
+**Partición**: DAY sobre `pickup_date` | **Cluster**: `pickup_location_id`, `payment_type`
 
 ### Silver — `dim_zones`
 
-Static NYC TLC zone lookup (265 zones). Adds `borough_group`, `is_airport` derived fields.
+Lookup estático de zonas TLC de NYC (265 zonas). Agrega campos derivados `borough_group` e `is_airport`.
 
-### Gold KPI tables
+### Tablas KPI Gold
 
-| Table | Grain | Key metrics |
+| Tabla | Granularidad | Métricas clave |
 |-------|-------|-------------|
-| `kpi_daily_revenue` | Day | trips, revenue, tip rate, p50/p90/p99 revenue, payment mix |
-| `kpi_zone_performance` | Month × Zone | total_pickups, revenue, borough ranking, revenue share |
-| `kpi_hourly_patterns` | Month × DOW × Hour | demand index, time-of-day segment, avg revenue |
+| `kpi_daily_revenue` | Día | viajes, ingresos, tasa de propina, p50/p90/p99 ingresos, mix de pago |
+| `kpi_zone_performance` | Mes × Zona | total_pickups, ingresos, ranking por borough, participación en ingresos |
+| `kpi_hourly_patterns` | Mes × Día semana × Hora | índice de demanda, segmento horario, ingreso promedio |
 
 ---
 
-## Prerequisites
+## Prerequisitos
 
-- GCP project with billing enabled
-- `gcloud` CLI authenticated (`gcloud auth application-default login`)
-- Terraform >= 1.5 ([install](https://developer.hashicorp.com/terraform/downloads))
+- Proyecto GCP con facturación habilitada
+- `gcloud` CLI autenticado (`gcloud auth application-default login`)
+- Terraform >= 1.5 ([instalar](https://developer.hashicorp.com/terraform/downloads))
 - Python 3.11+
-- `make` (Linux/Mac) or WSL/Git Bash (Windows)
+- `make` (Linux/Mac) o WSL/Git Bash (Windows)
 
 ---
 
-## Deployment
+## Despliegue
 
-### 1. Enable GCP APIs
+### 1. Habilitar APIs de GCP
 
 ```bash
-export PROJECT_ID=your-gcp-project-id
+export PROJECT_ID=tu-gcp-project-id
 make setup-gcp PROJECT_ID=$PROJECT_ID
 ```
 
-### 2. Create Terraform state bucket
+### 2. Crear bucket para el estado de Terraform
 
 ```bash
 gsutil mb -p $PROJECT_ID -l us-central1 gs://${PROJECT_ID}-tf-state
 ```
 
-Update the `backend "gcs"` block in [terraform/main.tf](terraform/main.tf):
+Actualiza el bloque `backend "gcs"` en [terraform/main.tf](terraform/main.tf):
 
 ```hcl
 backend "gcs" {
-  bucket = "your-project-tf-state"   # ← change this
+  bucket = "tu-proyecto-tf-state"   # ← cambiar esto
   prefix = "nyc-taxi-platform/tfstate"
 }
 ```
 
-### 3. Configure variables
+### 3. Configurar variables
 
 ```bash
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
-# Edit terraform.tfvars with your project_id and preferences
+# Editar terraform.tfvars con tu project_id y preferencias
 ```
 
-### 4. Deploy infrastructure
+### 4. Desplegar infraestructura
 
 ```bash
 make tf-init
@@ -176,36 +176,36 @@ make tf-plan ENV=dev
 make tf-apply ENV=dev
 ```
 
-This creates:
-- 3 GCS buckets (raw, staging, pipeline-logs)
-- 4 BigQuery datasets (bronze, silver, gold, metadata)
-- 2 metadata tables (pipeline_runs, quality_checks)
-- 1 bronze trips table (partitioned + clustered)
-- 1 service account with minimum IAM permissions
-- 1 Google Workflows pipeline
+Esto crea:
+- 3 buckets GCS (raw, staging, pipeline-logs)
+- 4 datasets BigQuery (bronze, silver, gold, metadata)
+- 2 tablas de metadatos (pipeline_runs, quality_checks)
+- 1 tabla bronze de viajes (particionada + con cluster)
+- 1 cuenta de servicio con permisos IAM mínimos
+- 1 pipeline de Google Workflows
 
-### 5. Install Python dependencies
+### 5. Instalar dependencias Python
 
 ```bash
 make install
 ```
 
-### 6. Run the pipeline
+### 6. Ejecutar el pipeline
 
 ```bash
-# Ingest and process a specific month
+# Ingestar y procesar un mes específico
 make run-pipeline DATE=2024-01
 
-# Or trigger only the ingestion step
+# O disparar solo el paso de ingesta
 make ingest DATE=2024-01
 
-# Run quality checks standalone
+# Ejecutar controles de calidad de forma independiente
 make quality-check DATE=2024-01
 ```
 
 ---
 
-## Example Execution
+## Ejemplo de Ejecución
 
 ```bash
 $ make run-pipeline DATE=2024-03 ENV=dev
@@ -227,7 +227,7 @@ Workflow execution started: projects/my-project/locations/us-central1/workflows/
 $ make quality-check DATE=2024-03
 
 ╭──────────┬──────────────────────────────────┬────────┬────────────┬──────────────┬───────────╮
-│ Layer    │ Check                            │ Status │ Rows Tested│ Rows Failed  │ Failure % │
+│ Capa     │ Control                          │ Estado │ Filas Eval │ Filas Fallas │ % Falla   │
 ├──────────┼──────────────────────────────────┼────────┼────────────┼──────────────┼───────────┤
 │ bronze   │ not_null_pickup_datetime         │ PASSED │  3,614,799 │            0 │     0.00% │
 │ bronze   │ minimum_row_count                │ PASSED │  3,614,799 │            0 │     0.00% │
@@ -239,22 +239,22 @@ $ make quality-check DATE=2024-03
 │ gold     │ positive_daily_revenue           │ PASSED │         31 │            0 │     0.00% │
 ╰──────────┴──────────────────────────────────┴────────┴────────────┴──────────────┴───────────╯
 
-[PASS] All checks passed (0 warnings).
+[PASS] Todos los controles pasaron (0 advertencias).
 ```
 
 ---
 
-## Monitoring & Troubleshooting
+## Monitoreo y Solución de Problemas
 
-### Pipeline execution history
+### Historial de ejecuciones del pipeline
 
 ```bash
 make pipeline-status
 ```
 
-Or in GCP Console: **Workflows → nyc-taxi-pipeline-dev → Executions**
+O en la Consola de GCP: **Workflows → nyc-taxi-pipeline-dev → Executions**
 
-### Query pipeline run logs in BigQuery
+### Consultar logs de ejecución en BigQuery
 
 ```sql
 SELECT
@@ -264,12 +264,12 @@ SELECT
   duration_seconds,
   TIMESTAMP_DIFF(completed_at, run_date, SECOND) AS total_duration_s,
   error_message
-FROM `your-project.nyc_taxi_dev_metadata.pipeline_runs`
+FROM `tu-proyecto.nyc_taxi_dev_metadata.pipeline_runs`
 ORDER BY run_date DESC
 LIMIT 20;
 ```
 
-### Query quality check trends
+### Consultar tendencias de controles de calidad
 
 ```sql
 SELECT
@@ -279,50 +279,50 @@ SELECT
   status,
   rows_failed,
   failure_rate
-FROM `your-project.nyc_taxi_dev_metadata.quality_checks`
+FROM `tu-proyecto.nyc_taxi_dev_metadata.quality_checks`
 WHERE status != 'PASSED'
 ORDER BY check_timestamp DESC;
 ```
 
-### Common issues
+### Problemas comunes
 
-| Issue | Likely cause | Fix |
+| Problema | Causa probable | Solución |
 |-------|-------------|-----|
-| `404` on TLC download | Month not yet published | TLC publishes ~2 months after the fact. Check available files. |
-| BQ load fails schema mismatch | TLC changed column types | Update bronze table schema in `modules/bigquery/main.tf` |
-| Quality gate fails row count | Ingestion partially failed | Re-run `make ingest DATE=YYYY-MM` then `make run-pipeline` |
-| Workflow permission denied | SA missing a role | Check IAM module, re-apply Terraform |
+| `404` en descarga TLC | Mes aún no publicado | TLC publica ~2 meses después. Verificar archivos disponibles. |
+| Falla de carga BQ por esquema | TLC cambió tipos de columnas | Actualizar esquema de tabla bronze en `modules/bigquery/main.tf` |
+| Control de calidad falla en conteo | Ingesta parcialmente fallida | Re-ejecutar `make ingest DATE=YYYY-MM` luego `make run-pipeline` |
+| Workflow sin permisos | SA falta un rol | Revisar módulo IAM, re-aplicar Terraform |
 
 ---
 
-## Technical Decisions
+## Decisiones Técnicas
 
-**Why Google Workflows instead of Airflow/Composer?**
-Workflows is serverless, has zero infra cost when idle, natively integrates with GCP APIs (BigQuery, GCS), and is simpler to operate. For a monthly batch pipeline, the overhead of Composer is unwarranted.
+**¿Por qué Google Workflows en lugar de Airflow/Composer?**
+Workflows es serverless, no tiene costo de infraestructura en reposo, se integra nativamente con las APIs de GCP (BigQuery, GCS) y es más simple de operar. Para un pipeline batch mensual, la sobrecarga de Composer no está justificada.
 
-**Why CTAS for silver/gold instead of MERGE?**
-For monthly batch loads, `CREATE OR REPLACE TABLE` on a partition is simpler, cheaper (one pass), and easier to reason about than MERGE. MERGE is reserved for the bronze deduplication step where we need upsert semantics.
+**¿Por qué CTAS para silver/gold en lugar de MERGE?**
+Para cargas batch mensuales, `CREATE OR REPLACE TABLE` sobre una partición es más simple, más barato (un solo paso) y más fácil de razonar que MERGE. MERGE se reserva para el paso de deduplicación en bronze donde se necesita semántica de upsert.
 
-**Why partitioning bronze by MONTH but silver by DAY?**
-Bronze mirrors the source (monthly files). Silver is queried at day granularity in gold builds, so DAY partitioning avoids full-month scans when building a single day's KPIs during backfills.
+**¿Por qué particionar bronze por MES pero silver por DÍA?**
+Bronze replica la fuente (archivos mensuales). Silver se consulta a granularidad diaria en las construcciones gold, por lo que la partición por DÍA evita escaneos del mes completo al construir los KPIs de un solo día durante backfills.
 
-**Why a separate metadata dataset?**
-Separating observability data from business data makes IAM and cost attribution cleaner. A read-only analyst role on gold doesn't need access to pipeline internals.
-
----
-
-## Future Improvements
-
-- [ ] **dbt integration** — replace raw SQL files with dbt models for lineage, docs, and testing
-- [ ] **Backfill CLI** — `make backfill FROM=2023-01 TO=2024-12` for historical loads
-- [ ] **Looker Studio dashboard** — connect to gold tables for a live public demo
-- [ ] **Schema evolution** — add BigQuery schema auto-update when TLC adds columns
-- [ ] **Green/FHV taxi data** — extend ingestion to other TLC vehicle types
-- [ ] **Streaming layer** — add a real-time path via Pub/Sub + Dataflow for live trip data
-- [ ] **Cost monitoring** — BigQuery slot and storage cost alerts via Cloud Monitoring
+**¿Por qué un dataset de metadatos separado?**
+Separar los datos de observabilidad de los datos del negocio hace más limpia la gestión de IAM y la atribución de costos. Un rol de analista de solo lectura en gold no necesita acceso a los internos del pipeline.
 
 ---
 
-## License
+## Mejoras Futuras
+
+- [ ] **Integración con dbt** — reemplazar archivos SQL crudos con modelos dbt para linaje, documentación y testing
+- [ ] **CLI de Backfill** — `make backfill FROM=2023-01 TO=2024-12` para cargas históricas
+- [ ] **Dashboard en Looker Studio** — conectar a tablas gold para una demo pública en vivo
+- [ ] **Evolución de esquema** — agregar actualización automática de esquema en BigQuery cuando TLC agrega columnas
+- [ ] **Datos de taxis Green/FHV** — extender la ingesta a otros tipos de vehículos TLC
+- [ ] **Capa de streaming** — agregar un camino en tiempo real via Pub/Sub + Dataflow para datos de viajes en vivo
+- [ ] **Monitoreo de costos** — alertas de slots y almacenamiento de BigQuery via Cloud Monitoring
+
+---
+
+## Licencia
 
 MIT
